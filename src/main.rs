@@ -10,42 +10,35 @@ enum RgrepError {
     FailedToRead(std::io::Error),
 }
 
+struct Rgrep {
+    pattern: String,
+    path: PathBuf,
+    files: Vec<PathBuf>,
+    case_sensetivity: bool,
+}
+
 fn main() {
     let args: Vec<String> = args().collect();
 
-    let (pattern, files, case_insensitive) = match parser(args) {
-        Ok(result) => result,
-        Err(err) => {
-            handle_error(err);
-            return;
-        }
+    let mut rgrep = Rgrep { 
+        pattern: String::new(), 
+        path: PathBuf::new(), 
+        files: vec![], 
+        case_sensetivity: false, 
     };
 
-    if let Err(err) = search(pattern, files, case_insensitive) {
+    if let Err(err) = parser(args, &mut rgrep) {
+        handle_error(err);
+    }
+
+    if let Err(err) = search(&rgrep) {
         handle_error(err);
     }  
 }
 
-fn handle_error(err: RgrepError) {
-    match err {
-        RgrepError::DoNotExist => {
-            eprintln!("error: path does not exist");
-            std::process::exit(1);
-        },
-        RgrepError::CommandError => {
-            eprintln!("error: try 'rgrep --help'");
-            std::process::exit(127);
-        },
-        RgrepError::FailedToRead(e) => {
-            eprintln!("error: {}", e);
-            std::process::exit(1);
-        },
-    }
-}
-
-fn search(pattern: String, files: Vec<PathBuf>, case_insensitive: bool) -> Result<(), RgrepError> {
+fn search(rgrep: &Rgrep) -> Result<(), RgrepError> {
     println!("");
-    for file_path in files {
+    for file_path in &rgrep.files {
         let file_content = match fs::read_to_string(&file_path) {
             Ok(file_content) => file_content,
             Err(err) => {
@@ -56,8 +49,8 @@ fn search(pattern: String, files: Vec<PathBuf>, case_insensitive: bool) -> Resul
         let lines: Vec<&str> = file_content.lines().collect();
 
         for line in lines {
-            if case_insensitive {
-                let (line_case, pattern_case) = (line.to_lowercase(), pattern.to_lowercase());
+            if rgrep.case_sensetivity {
+                let (line_case, pattern_case) = (line.to_lowercase(), rgrep.pattern.to_lowercase());
                 
                 if line_case.contains(&pattern_case) {
                     println!("{}", line);
@@ -65,7 +58,7 @@ fn search(pattern: String, files: Vec<PathBuf>, case_insensitive: bool) -> Resul
                 }
             }
 
-            if line.contains(&pattern) { // we might need coloring
+            if line.contains(&rgrep.pattern) { // we might need coloring
                 println!("{}", line);
             }
         }   
@@ -79,7 +72,7 @@ fn traversal(path: PathBuf, files: &mut Vec<PathBuf>) -> Result<(), RgrepError> 
     let read_dir = match fs::read_dir(path) {
         Ok(read_dir) => read_dir,
         Err(err) => {
-            return Err(DoNotExist);
+            return Err(FailedToRead(err));
         }
     };
 
@@ -97,7 +90,9 @@ fn traversal(path: PathBuf, files: &mut Vec<PathBuf>) -> Result<(), RgrepError> 
                 continue;
             }
 
-            traversal(path, files);
+            if let Err(err) = traversal(path, files) {
+                return Err(err);
+            }
         } else if path.is_file() {
             files.push(path);
         } else {
@@ -109,15 +104,11 @@ fn traversal(path: PathBuf, files: &mut Vec<PathBuf>) -> Result<(), RgrepError> 
     Ok(())
 }
 
-fn parser(args: Vec<String>) -> Result<(String, Vec<PathBuf>, bool), RgrepError> {
+fn parser(args: Vec<String>, rgrep: &mut Rgrep) -> Result<(), RgrepError> {
     if args.len() > 4 || args.len() < 2 { 
         return Err(CommandError);
     }
-
-    let mut case_insensetive = false;
-    let mut files = vec![];
-    let (pattern, path);
-
+    
     if args[1] == String::from("-h") || args[1] == String::from("--help") {
         helper();
         std::process::exit(0);
@@ -125,22 +116,56 @@ fn parser(args: Vec<String>) -> Result<(String, Vec<PathBuf>, bool), RgrepError>
         println!("rgrep 0.1");
         std::process::exit(0);
     } else if args[1] == String::from("-i") && args.len() == 4 {
-        case_insensetive = true;
-        pattern = &args[2];
-        path = &args[3];
+        rgrep.case_sensetivity = true;
+        rgrep.pattern = args[2].clone();
+        rgrep.path = PathBuf::from(args[3].clone());
     } else if args.len() == 3 {
-        pattern = &args[1];
-        path = &args[2];
+        rgrep.pattern = args[1].clone();
+        rgrep.path = PathBuf::from(args[2].clone());
     } else {
         return Err(CommandError)
     }
 
-    // directory travesral 
-    if let Err(err) = traversal(PathBuf::from(path), &mut files) {
-        return Err(err);
+    // if the path is file, no traversal is needed.
+    let metadata = match fs::metadata(rgrep.path.clone()) {
+        Ok(metadata) => metadata,
+        Err(err) => {
+            return Err(FailedToRead(err));
+        }
+    };
+
+    if metadata.is_dir() {
+        // directory travesral 
+        if let Err(err) = traversal(rgrep.path.to_path_buf(), &mut rgrep.files) {
+            return Err(err);
+        }
+    } else if metadata.is_file() {
+        rgrep.files.push(rgrep.path.to_path_buf());
+    } else { // temporary
+        eprintln!("error: failed to read the type of file");
+        std::process::exit(1);        
     }
 
-    Ok((pattern.to_owned(), files, case_insensetive))  
+    Ok(())
+
+    // Ok((pattern.to_owned(), files, case_insensetive))  
+}
+
+fn handle_error(err: RgrepError) {
+    match err {
+        RgrepError::DoNotExist => {
+            eprintln!("error: path does not exist");
+            std::process::exit(1);
+        },
+        RgrepError::CommandError => {
+            eprintln!("error: try 'rgrep --help'");
+            std::process::exit(1);
+        },
+        RgrepError::FailedToRead(e) => {
+            eprintln!("error: {}", e);
+            std::process::exit(1);
+        },
+    }
 }
 
 fn helper() {
